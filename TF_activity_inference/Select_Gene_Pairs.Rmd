@@ -1,0 +1,128 @@
+---
+title: "Select gene pairs"
+author: "Xiaoting Li"
+date: "9/20/2022"
+output: html_document
+---
+
+```{r}
+#setwd({data_dir})
+
+library(GenomicRanges)
+library(ggplot2)
+library(reshape2)
+
+gene.info <- rtracklayer::import("gencode.v26.GRCh38.genes.gtf")
+gene.info <- gene.info[gene.info$type == "gene" & gene.info$gene_type == "protein_coding",]
+```
+
+## Neighboring pairs
+
+```{r}
+get_neighbor_pairs <- function(seqn){
+  genes_chr <- gene.info[seqnames(gene.info) == seqn]
+  genes_tss <- ifelse(strand(genes_chr) == "+", start(genes_chr), end(genes_chr))
+  genes_chr <- genes_chr[order(genes_tss)]
+  
+  g1 <- genes_chr[-length(genes_chr)]
+  g1_tss <- ifelse(strand(g1) == "+", start(g1), end(g1))
+  g2 <- genes_chr[-1]
+  g2_tss <- ifelse(strand(g2) == "+", start(g2), end(g2))
+  
+  pairs_df <- data.frame(g1 = g1$gene_id, g2 = g2$gene_id, g1_tss = g1_tss, g2_tss = g2_tss)
+  return(pairs_df)
+}
+
+pairs_neighbor_ls <- lapply(seqlevels(gene.info)[1:22], get_neighbor_pairs)
+pairs_neighbor_DF <- Reduce(rbind, pairs_neighbor_ls)
+```
+
+### Filter neightboring pairs based on distances between TSS
+```{r}
+g_dist <- pairs_neighbor_DF$g2_tss - pairs_neighbor_DF$g1_tss
+plot.ecdf(log10(g_dist), xlab = "log10(distance)")
+abline(v = log10(1e4), col = "grey")
+text(x = log10(1e4), y=0, pos = 4, labels = "10k", col='grey')
+abline(v = log10(2e5), col = "grey")
+text(x = log10(2e5), y=0, pos = 4, labels = "200k", col='grey')
+
+pairs_filtered <- pairs_filtered[g_dist <= 2e5 & g_dist >= 1e4,]
+write.csv(pairs_filtered, "example_data/gene_pairs_neighboring.csv")
+```
+
+
+## 5th pairs and 10th pairs
+
+```{r}
+get_5th_pairs <- function(seqn){
+  genes_chr <- gene.info[seqnames(gene.info) == seqn]
+  genes_tss <- ifelse(strand(genes_chr) == "+", start(genes_chr), end(genes_chr))
+  genes_chr <- genes_chr[order(genes_tss)]
+  
+  g1 <- genes_chr[-c((length(genes_chr)-4): length(genes_chr))]
+  g2 <- genes_chr[-c(1:5)]
+  
+  g1_tss <- ifelse(strand(g1) == "+", start(g1), end(g1))
+  g2_tss <- ifelse(strand(g2) == "+", start(g2), end(g2))
+  
+  pairs_df <- data.frame(g1 = g1$gene_id, g2 = g2$gene_id, g1_tss = g1_tss, g2_tss = g2_tss)
+  return(pairs_df)
+}
+
+pairs_5th_ls <- lapply(seqlevels(gene.info)[1:22], get_5th_pairs)
+pairs_5th_DF <- Reduce(rbind, pairs_5th_ls)
+
+
+get_10th_pairs <- function(seqn){
+  genes_chr <- gene.info[seqnames(gene.info) == seqn]
+  genes_tss <- ifelse(strand(genes_chr) == "+", start(genes_chr), end(genes_chr))
+  genes_chr <- genes_chr[order(genes_tss)]
+  
+  g1 <- genes_chr[-c((length(genes_chr)-9): length(genes_chr))]
+  g2 <- genes_chr[-c(1:10)]
+  
+  g1_tss <- ifelse(strand(g1) == "+", start(g1), end(g1))
+  g2_tss <- ifelse(strand(g2) == "+", start(g2), end(g2))
+  
+  pairs_df <- data.frame(g1 = g1$gene_id, g2 = g2$gene_id, g1_tss = g1_tss, g2_tss = g2_tss)
+  return(pairs_df)
+}
+
+pairs_10th_ls <- lapply(seqlevels(gene.info)[1:22], get_10th_pairs)
+pairs_10th_DF <- Reduce(rbind, pairs_10th_ls)
+
+
+write.csv(pairs_5th_DF, "example_data/gene_pairs_5th.csv")
+write.csv(pairs_10th_DF, "example_data/gene_pairs_10th.csv")
+```
+
+
+## Random pairs from different chromosomes
+```{r}
+set.seed(1)
+gene.random <- gene.info[sample(1:length(gene.info))]
+g1 <- gene.random[seq(1, length(gene.random)-1, 2)]
+g2 <- gene.random[seq(2, length(gene.random), 2)]
+table(seqnames(g1) == seqnames(g2))
+
+fil <- seqnames(g1) != seqnames(g2)
+g1 <- g1[fil]
+g2 <- g2[fil]
+random_df1 <- data.frame(g1 = g1$gene_id, g2 = g2$gene_id)
+write.csv(random_df1, "Pairs/pairs_random1.csv")
+
+
+set.seed(2)
+gene.random <- gene.info[sample(1:length(gene.info))]
+g1 <- gene.random[seq(1, length(gene.random)-1, 2)]
+g2 <- gene.random[seq(2, length(gene.random), 2)]
+table(seqnames(g1) == seqnames(g2))
+
+fil <- seqnames(g1) != seqnames(g2)
+g1 <- g1[fil]
+g2 <- g2[fil]
+random_df2 <- data.frame(g1 = g1$gene_id, g2 = g2$gene_id)
+write.csv(random_df2, "example_data/gene_pairs_random2.csv")
+```
+
+

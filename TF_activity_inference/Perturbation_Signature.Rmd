@@ -1,0 +1,155 @@
+---
+title: "Generating TF Perturbation Gene Signature"
+author: "Xiaoting Li"
+date: "9/20/2022"
+output: html_document
+---
+
+## Get CRISPRi RNA-seq metadata from ENCODE
+```{r}
+#setwd({data_dir})
+exp_info <- data.table::fread("example_data/ENCODE_experiment_report_2021_10_11.tsv") ## Downloaded from ENCODE
+
+bam_meta <- data.table::fread("example_data/ENCODE_metadata.tsv")
+bam_meta <- bam_meta[bam_meta$`Output type` == "alignments" & bam_meta$`File assembly` == "GRCh38" & bam_meta$`Genome annotation` == "V29",]
+bam_meta <- bam_meta[,c("File accession", "Experiment accession", "Biological replicate(s)", "File download URL")]
+write.table(bam_meta, "ENCODE_Signature/alignments_files.txt", row.names = F, col.names = T, quote = F)
+```
+
+
+## Download alignment files; generate RNA-Seq counts
+```{bash}
+cd $data_dir/ENCODE_Signature
+
+wget http://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_29/gencode.v29.annotation.gtf.gz
+gzip -d gencode.v29.annotation.gtf.gz
+
+
+for i in $(seq 1 739);
+do
+  path=`sed -n $i\p alignments_files.txt | awk '{print $4}'`
+  wget $path -P alignments
+
+  file=`sed -n $i\p alignments_files.txt | awk '{print $1}'`
+  featureCounts -p -a gencode.v29.annotation.gtf -o counts/$file.txt  alignments/$file.bam
+done
+
+```
+
+
+## Process count matrix for each TF
+Get treatments and controls for each experiment; filter genes by protein-coding genes.
+```{r}
+exp_prtb <- exp_info[exp_info$Perturbed,]
+exp_prtb$`Control Accession` <- sapply(strsplit(exp_prtb$Controls, "/"), "[[", 3)
+exp_meta_CRISPRi <- exp_prtb[exp_prtb$`Assay title` == "CRISPRi RNA-seq",]
+
+
+getMeta <- function(i, exp_meta = exp_meta_CRISPRi) {
+  trt_df <- bam_meta[bam_meta$`Experiment accession` == exp_meta$Accession[i], ]
+  ctrl_df <- bam_meta[bam_meta$`Experiment accession` == exp_meta$`Control Accession`[i], ]
+  
+  meta_df <- data.frame(accession = c(trt_df$`Experiment accession`, ctrl_df$`Experiment accession`),
+                        target = exp_meta$`Target of assay`[i],
+                        assay = exp_meta$`Assay title`[i],
+                        cl = exp_meta$`Biosample term name`[i],
+                        sample = c(paste("trt", trt_df$`Biological replicate(s)`, sep = "_"), paste("ctrl", ctrl_df$`Biological replicate(s)`, sep = "_")),
+                        file = c(trt_df$`File accession`, ctrl_df$`File accession`))
+  return(meta_df)
+}
+
+exp_files_ls <- lapply(1:nrow(exp_meta_CRISPRi), getMeta)
+names(exp_files_ls) <- exp_meta_CRISPRi$`Target of assay`
+exp_all <- Reduce(rbind, exp_files_ls)
+
+
+gene.info <- rtracklayer::import("ENCODE_Signature/gencode.v29.annotation.gtf")
+gene.info <- gene.info[gene.info$type == "gene" & gene.info$gene_type == "protein_coding",]
+
+readCounts <- function(acc){
+  df <- read.table(paste0("ENCODE_Signature/counts/", acc, ".txt"), header = T)
+  rownames(df) <- df$Geneid
+  colnames(df)[ncol(df)] <- acc
+  df <- df[gene.info$gene_id, c("Geneid", "Length", acc)]
+  return(df)
+}
+
+
+ct_ls <- lapply(unique(exp_all$file), readCounts)
+names(ct_ls) <- unique(exp_all$file)
+
+
+getCountsDF <- function(exp_meta) {
+  counts_ls <- ct_ls[exp_meta$file] 
+  counts_df <- Reduce(cbind, counts_ls)
+  counts_df <- cbind(counts_df[,c(1,2)], counts_df[,exp_meta$file])
+  colnames(counts_df)[-c(1:2)] <- exp_meta$sample
+  return(counts_df)
+}
+counts_DF_ls <- lapply(exp_files_ls, getCountsDF)
+names(counts_DF_ls) <- exp_meta_CRISPRi$`Target of assay`
+
+```
+
+
+## Differential expression analysis
+Signature: shrinkage log2FC
+```{r}
+library(DESeq2)
+
+getDDS <- function(TF) {
+  counts_encode <- counts_DF_ls[[TF]]
+  counts_encode <- counts_encode[, !colnames(counts_encode) %in% c("Geneid", "Length")]
+  
+  coldata <- data.frame(condition = sapply(strsplit(colnames(counts_encode), "_"), "[[", 1))
+  rownames(coldata) <- colnames(counts_encode)
+  coldata$condition <- as.factor(coldata$condition)
+  
+  dds <- DESeqDataSetFromMatrix(countData = counts_encode,
+                                colData = coldata,
+                                design = ~ condition)
+  dds <- DESeq(dds)
+  return(dds)
+}
+
+
+TFs <- names(counts_DF_ls)
+dds_ls <- lapply(TFs, getDDS)
+res_ls <- lapply(dds_ls, results)
+names(dds_ls) <- names(res_ls) <- TFs
+
+resLFC_ls <- lapply(dds_ls ,function(dds) lfcShrink(dds, coef="condition_trt_vs_ctrl", type="apeglm"))
+names(resLFC_ls) <- TFs
+
+shrink_LFC_df <- sapply(resLFC_ls, "[[", 2)
+rownames(shrink_LFC_df) <- rownames(res_ls[[1]])
+write.csv(shrink_LFC_df, "example_data/ENCODE_CRISPRi_shrinkLFC.csv", row.names = T, quote = F)
+```
+
+
+## Quality Control
+TF gene counts and PCA plots
+```{r}
+library(ggplot2)
+
+plotDE <- function(TF){
+  par(fig = c(0,0.4,0,1))
+  TF_nm <- ifelse(TF == "WHSC1", "NSD2", TF)
+  tf_gene <- encode.info$gene_id[encode.info$gene_name == TF_nm]
+  plotCounts(dds_ls[[TF]], gene = tf_gene, main = paste0(TF, "\n", tf_gene))
+  par(fig = c(0.4,1,0,1), new=TRUE)
+  plotMA(resLFC_ls[[TF]], main = "shrinkage log2FC")
+}
+
+plotpca <- function(TF){
+  vsd <- vst(dds_ls[[TF]], blind=FALSE)
+  plotPCA(vsd) + ggtitle(TF)
+}
+
+for(TF in TFs){
+  plotDE(TF)
+  print(plotpca(TF))
+}
+```
+
+
